@@ -2,15 +2,14 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/labstack/echo/v4"
+
+	echo "github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/spf13/viper"
 )
@@ -22,15 +21,15 @@ func init(){
 	viper.AddConfigPath(".")               // optionally look for config in the working directory
 	err := viper.ReadInConfig() // Find and read the config file
 	if err != nil { // Handle errors reading the config file
-		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+		log.Fatalf("Fatal error config file: %s \n", err)
 	}
 	
-	if err := verifyConfig(); err != nil {
-		panic(fmt.Errorf("Fatal configuration error: %s \n", multierror.Flatten(err)))
+	if err := validateConfig(); err != nil {
+		log.Fatalf("Fatal configuration error: %s \n", multierror.Flatten(err))
 	}
 }
 
-func verifyConfig() error{
+func validateConfig() error{
 	var result *multierror.Error
 	port := viper.GetString("port")
 	portint, err := strconv.Atoi(port);
@@ -53,8 +52,24 @@ func verifyConfig() error{
 	if len(filePath) < 1 {
 		result = multierror.Append(result, errors.New("FilePath not set"))
 	}
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	fi, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
 		result = multierror.Append(result, errors.New("FilePath doesn't exist"))
+	}else if fi.Mode(); !fi.IsDir(){
+		result = multierror.Append(result, errors.New("FilePath is not a valid directory"))
+	}
+
+
+	rtcp := viper.GetString("rtorrent_cache_path")
+	if len(rtcp) < 1{
+		log.Println("Warning: No torrent cache path set.")
+	}else{
+		fi, err := os.Stat(rtcp)
+		if os.IsNotExist(err) {
+			result = multierror.Append(result, errors.New("rtorrent_cache_path doesn't exist"))
+		}else if fi.Mode(); !fi.IsDir(){
+			result = multierror.Append(result, errors.New("rtorrent_cache_path is not a valid directory"))
+		}
 	}
 	
 	return result.ErrorOrNil()
@@ -83,16 +98,16 @@ func main() {
 
 // Handler
 func hello(c echo.Context) error {
-  return c.String(http.StatusOK, "Hello, World!")
+  return c.String(http.StatusOK, "github.com/zvodd/webseeder")
 }
 
-func filesHandler(c echo.Context) error {
-	fileName := c.Param("fileName")
-	fileLocation := filepath.Join(viper.GetString("filepath"), fileName)
-	return c.File(fileLocation)
-	// return c.String(http.StatusOK, "/users/:"+id)
-}
 
+// list
+func listHandler(c echo.Context) error {
+	// rtcp := viper.GetString("rtorrent_cache_path")
+	
+	return nil
+}
 
 func authMidHandler(username, password string, c echo.Context) (bool, error) {
 	if username == viper.GetString("username") && password == viper.GetString("password") {
