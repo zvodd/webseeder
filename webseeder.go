@@ -5,11 +5,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/hashicorp/go-multierror"
 
-	echo "github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/spf13/viper"
 )
@@ -29,10 +30,25 @@ func init(){
 	}
 }
 
+var (
+	mainPort string
+	useTLS = false
+	tlsPort string
+	tlsCert string
+	tlsKey string
+
+	htAuthUser string
+	htAuthPass string
+
+	staticFilePath string
+	torrentsFilePath string
+
+)
+
 func validateConfig() error{
 	var result *multierror.Error
-	port := viper.GetString("port")
-	portint, err := strconv.Atoi(port);
+	mainPort = viper.GetString("port")
+	portint, err := strconv.Atoi(mainPort);
 	if err != nil {
 		repErr := multierror.Prefix(err, "Port not valid number") 
 		result = multierror.Append(result, repErr)
@@ -40,19 +56,48 @@ func validateConfig() error{
 	if portint <= 0 || portint > 65535 {
 		result = multierror.Append(result, errors.New("Port outside valid range"))
 	}
+	tlsPort = viper.GetString("tlsport")
+	if len(tlsPort) > 0{
+		useTLS = true
+		tlsportint, err := strconv.Atoi(tlsPort);
+		if err != nil {
+			repErr := multierror.Prefix(err, "TLS Port not valid number") 
+			result = multierror.Append(result, repErr)
+		}
+		if tlsportint <= 0 || tlsportint > 65535 {
+			result = multierror.Append(result, errors.New("TLS Port outside valid range"))
+		}
 
+		tlsCert = viper.GetString("tlscert")
+		_, err = os.Stat(tlsCert)
+		if os.IsNotExist(err) {
+			result = multierror.Append(result, errors.New("TLS Cert file not found"))
+		}
+
+		tlsKey = viper.GetString("tlskey")
+		_, err = os.Stat(tlsKey)
+		if os.IsNotExist(err) {
+			result = multierror.Append(result, errors.New("TLS Key file not found"))
+		}
+
+	}
+		
 	if len(viper.GetString("username")) <1{
 		log.Println("Warning: No username set.")
+	}else{
+		htAuthUser = viper.GetString("username")
 	}
 	if len(viper.GetString("password")) <1{
 		log.Println("Warning: No password set.")
+	}else{
+		htAuthPass = viper.GetString("password")
 	}
 	
-	filePath := viper.GetString("filepath")
-	if len(filePath) < 1 {
+	staticFilePath = viper.GetString("filepath")
+	if len(staticFilePath) < 1 {
 		result = multierror.Append(result, errors.New("FilePath not set"))
 	}
-	fi, err := os.Stat(filePath)
+	fi, err := os.Stat(staticFilePath)
 	if os.IsNotExist(err) {
 		result = multierror.Append(result, errors.New("FilePath doesn't exist"))
 	}else if fi.Mode(); !fi.IsDir(){
@@ -60,40 +105,55 @@ func validateConfig() error{
 	}
 
 
-	rtcp := viper.GetString("rtorrent_cache_path")
-	if len(rtcp) < 1{
+	torrentsFilePath = viper.GetString("torrentsfilepath")
+	if len(torrentsFilePath) < 1{
 		log.Println("Warning: No torrent cache path set.")
 	}else{
-		fi, err := os.Stat(rtcp)
+		fi, err := os.Stat(torrentsFilePath)
 		if os.IsNotExist(err) {
-			result = multierror.Append(result, errors.New("rtorrent_cache_path doesn't exist"))
+			result = multierror.Append(result, errors.New("Torrents path doesn't exist"))
 		}else if fi.Mode(); !fi.IsDir(){
-			result = multierror.Append(result, errors.New("rtorrent_cache_path is not a valid directory"))
+			result = multierror.Append(result, errors.New("Torrents path is not a valid directory"))
 		}
 	}
+
 	
 	return result.ErrorOrNil()
 }
 
 
 func main() {
-  // Echo instance
-  e := echo.New()
+	// Echo instance
+	e := echo.New()
 
-  // Middleware
-  e.Use(middleware.Logger())
-  e.Use(middleware.Recover())
+	// Middleware
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
 
-  // Routes
-  e.GET("/", hello)
-  g := e.Group("/files")
-  if (len(viper.GetString("username")) > 0 && len(viper.GetString("password")) > 0){
-	  g.Use(middleware.BasicAuth(authMidHandler))
-  }
-  g.Static("/", viper.GetString("filepath"))
+	// Routes
+	e.GET("/", hello)
+	gl := e.Group("/list")
+	gf := e.Group("/files")
+	if (len(htAuthUser) > 0 && len(htAuthPass) > 0){
+		gf.Use(middleware.BasicAuth(authMidHandler))
+		gl.Use(middleware.BasicAuth(authMidHandler))
+	}
+	gf.Static("/", staticFilePath)
 
-  // Start server
-  e.Logger.Fatal(e.Start(":"+viper.GetString("port")))
+	if len(torrentsFilePath) > 0{
+		log.Println("using listing")
+		gl.GET("", listHandler)
+		gl.GET("/", listHandler)
+	}
+
+
+	// Start server
+	if useTLS {
+	go func() {
+		e.Logger.Fatal(e.StartTLS(":"+tlsPort, tlsCert, tlsKey))
+		}()
+	}
+	e.Logger.Fatal(e.Start(":"+mainPort))
 }
 
 // Handler
@@ -104,13 +164,26 @@ func hello(c echo.Context) error {
 
 // list
 func listHandler(c echo.Context) error {
-	// rtcp := viper.GetString("rtorrent_cache_path")
-	
-	return nil
+
+	var files []string
+    err := filepath.Walk(torrentsFilePath, func(path string, info os.FileInfo, err error) error {
+		p,_ :=filepath.Rel(torrentsFilePath, path)
+		if p != "."{
+			files = append(files, p)
+		}
+        return nil
+    })
+    if err != nil {
+		c.String(http.StatusFailedDependency, "nope")
+    }
+	return c.JSON(http.StatusAccepted, files)
+
 }
 
+
+
 func authMidHandler(username, password string, c echo.Context) (bool, error) {
-	if username == viper.GetString("username") && password == viper.GetString("password") {
+	if username == htAuthUser && password == htAuthPass {
 		return true, nil
 	}
 	return false, nil
